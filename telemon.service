@@ -1,0 +1,15 @@
+[Unit]
+Description=Telemon — Telegram alerts for disk, CPU, RAM, services, containers
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /app/telemon/telemon.py
+WorkingDirectory=/app/telemon
+EnvironmentFile=/app/telemon/.env
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
