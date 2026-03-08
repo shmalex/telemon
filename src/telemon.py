@@ -107,7 +107,7 @@ DISK_IO_READ_MBPS    = _env_float("DISK_IO_READ_MBPS",    200)
 DISK_IO_WRITE_MBPS   = _env_float("DISK_IO_WRITE_MBPS",   100)
 
 # Watchdog targets
-WATCHED_SERVICES   = _env_list("WATCHED_SERVICES",   "nginx,postgresql")
+WATCHED_SERVICES   = _env_list("WATCHED_SERVICES",   "")
 WATCHED_CONTAINERS = _env_list("WATCHED_CONTAINERS", "")
 WATCHED_PM2        = _env_list("WATCHED_PM2",        "")
 PM2_USER           = os.environ.get("PM2_USER", "")
