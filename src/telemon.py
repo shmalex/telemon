@@ -117,6 +117,9 @@ DISK_IO_WRITE_MBPS   = _env_float("DISK_IO_WRITE_MBPS",   100)
 SPIKE_MULTIPLIER = _env_float("SPIKE_MULTIPLIER", 1.5)
 ADAPTIVE_WINDOW  = _env_int("ADAPTIVE_WINDOW",   30)
 
+# Periodic digest chart — sent 3× per day by default (every 8 hours)
+REPORT_INTERVAL = _env_int("REPORT_INTERVAL", 8 * 3600)
+
 # Watchdog targets
 WATCHED_SERVICES   = _env_list("WATCHED_SERVICES",   "")
 WATCHED_CONTAINERS = _env_list("WATCHED_CONTAINERS", "")
@@ -166,6 +169,16 @@ _down_since: dict[str, float] = {}       # key → timestamp when it went down
 _load_history:      deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
 _disk_io_r_history: deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
 _disk_io_w_history: deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
+
+# 24-hour metrics history for digest charts
+# Each entry: (timestamp, load1, cpu_pct, read_mbps, write_mbps)
+_HISTORY_MAXLEN = max(1, 24 * 3600 // CHECK_INTERVAL)
+_metrics_history: deque[tuple] = deque(maxlen=_HISTORY_MAXLEN)
+_last_report_time: float = 0.0
+
+# Last computed disk I/O values — updated by check_disk_io, read by _record_metrics
+_last_read_mbps:  float = 0.0
+_last_write_mbps: float = 0.0
 
 
 def _adaptive_threshold(history: deque, static_threshold: float) -> float:
@@ -412,6 +425,10 @@ def check_disk_io() -> str | None:
     _prev_io      = current_io
     _prev_io_time = current_time
 
+    global _last_read_mbps, _last_write_mbps
+    _last_read_mbps  = read_mbps
+    _last_write_mbps = write_mbps
+
     _disk_io_r_history.append(read_mbps)
     _disk_io_w_history.append(write_mbps)
 
@@ -432,6 +449,74 @@ def check_disk_io() -> str | None:
         f"Read:  {read_mbps:.1f} MB/s  (baseline: {r_baseline:.0f}, threshold: {read_threshold:.0f} MB/s)\n"
         f"Write: {write_mbps:.1f} MB/s  (baseline: {w_baseline:.0f}, threshold: {write_threshold:.0f} MB/s)"
     )
+
+
+# --- Metrics sampling & digest report ---
+
+def _record_metrics() -> None:
+    """Append a snapshot of current load, CPU and disk I/O to the 24h history."""
+    load1 = os.getloadavg()[0]
+    cpu_pct = psutil.cpu_percent()   # non-blocking: % since last call
+    _metrics_history.append((time.time(), load1, cpu_pct, _last_read_mbps, _last_write_mbps))
+
+
+def send_report_chart() -> None:
+    """Build and send a 24h load + disk I/O digest chart to Telegram."""
+    if not _metrics_history:
+        return
+
+    timestamps = [datetime.fromtimestamp(e[0]) for e in _metrics_history]
+    load_vals  = [e[1] for e in _metrics_history]
+    cpu_vals   = [e[2] for e in _metrics_history]
+    read_vals  = [e[3] for e in _metrics_history]
+    write_vals = [e[4] for e in _metrics_history]
+
+    hours_covered = (timestamps[-1] - timestamps[0]).total_seconds() / 3600
+    title_period = f"{hours_covered:.1f}h" if hours_covered < 23.5 else "24h"
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    fig.suptitle(f"{HOSTNAME} — digest ({title_period})", fontsize=12)
+
+    # Load average & CPU
+    ax1.plot(timestamps, load_vals, color="#e74c3c", linewidth=1, label="Load avg (1m)")
+    ax1.plot(timestamps, cpu_vals,  color="#e67e22", linewidth=1, alpha=0.6, label="CPU %")
+    ax1.axhline(LOAD_THRESHOLD, color="#e74c3c", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax1.set_ylabel("Load / CPU %")
+    ax1.legend(loc="upper right", fontsize=8)
+    ax1.grid(True, alpha=0.3)
+
+    # Disk I/O
+    ax2.fill_between(timestamps, read_vals,  alpha=0.4, color="#3498db", label="Read MB/s")
+    ax2.fill_between(timestamps, write_vals, alpha=0.4, color="#2ecc71", label="Write MB/s")
+    ax2.axhline(DISK_IO_READ_MBPS,  color="#3498db", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax2.axhline(DISK_IO_WRITE_MBPS, color="#2ecc71", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax2.set_ylabel("Disk I/O MB/s")
+    ax2.set_xlabel("Time")
+    ax2.legend(loc="upper right", fontsize=8)
+    ax2.grid(True, alpha=0.3)
+
+    fig.autofmt_xdate(rotation=30)
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=110)
+    buf.seek(0)
+    plt.close(fig)
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    caption = (
+        f"[{HOSTNAME}]\n📊 System digest ({title_period})\n"
+        f"Load avg now: {load_vals[-1]:.2f} | CPU: {cpu_vals[-1]:.1f}%\n"
+        f"Disk read: {read_vals[-1]:.0f} MB/s | write: {write_vals[-1]:.0f} MB/s"
+    )
+    try:
+        _telegram_post(
+            url,
+            data={"chat_id": CHAT_ID, "caption": caption},
+            files={"photo": ("report.png", buf, "image/png")},
+        )
+    finally:
+        buf.close()
 
 
 # --- Service watchdog ---
@@ -674,6 +759,9 @@ def main():
         f"Watching PM2 ({PM2_USER}): {', '.join(WATCHED_PM2) or '—'}"
     )
 
+    global _last_report_time
+    _last_report_time = time.time()   # don't send a report immediately on start
+
     while True:
         # --- Threshold and watchdog checks ---
         for check_fn, with_chart in THRESHOLD_CHECKS:
@@ -687,6 +775,12 @@ def main():
         # --- Journal errors (plain text — a RAM chart per error would be noisy) ---
         for error_msg in get_journal_errors():
             send_message(error_msg)
+
+        # --- Record metrics snapshot & send periodic digest ---
+        _record_metrics()
+        if time.time() - _last_report_time >= REPORT_INTERVAL:
+            send_report_chart()
+            _last_report_time = time.time()
 
         time.sleep(CHECK_INTERVAL)
 
