@@ -86,6 +86,28 @@ The script will:
 
 ---
 
+## Updating an existing installation
+
+Deploy only the script (no reinstall needed):
+
+```bash
+scp src/telemon.py scr:/app/telemon/telemon.py && ssh scr "systemctl restart telemon"
+```
+
+If you also changed `.env`:
+
+```bash
+scp .env scr:/app/monitor/.env && ssh scr "systemctl restart telemon"
+```
+
+Full reinstall (changed `telemon.service` or `install.sh`):
+
+```bash
+sudo bash install.sh
+```
+
+---
+
 ## Managing the service
 
 ```bash

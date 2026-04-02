@@ -22,9 +22,11 @@ import logging
 import os
 import signal
 import socket
+import statistics
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -83,9 +85,10 @@ def _env_list(key: str, default: str = "") -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-HOSTNAME  = socket.gethostname()
+BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
+HOST_PREFIX = os.environ.get("HOST_PREFIX", "")
+HOSTNAME    = HOST_PREFIX + '-' + socket.gethostname() if HOST_PREFIX else socket.gethostname()
 
 CHECK_INTERVAL = _env_int("CHECK_INTERVAL", 10)    # seconds between cycles
 ALERT_COOLDOWN = _env_int("ALERT_COOLDOWN", 300)   # seconds before repeating an alert
@@ -105,6 +108,12 @@ SWAP_THRESHOLD_PCT   = _env_float("SWAP_THRESHOLD_PCT",   80)
 LOAD_THRESHOLD       = _env_float("LOAD_THRESHOLD",       10.0)
 DISK_IO_READ_MBPS    = _env_float("DISK_IO_READ_MBPS",    200)
 DISK_IO_WRITE_MBPS   = _env_float("DISK_IO_WRITE_MBPS",   100)
+
+# Adaptive baseline — alert only when value is SPIKE_MULTIPLIER× above rolling median
+# ADAPTIVE_WINDOW samples × CHECK_INTERVAL seconds = history window
+# e.g. 30 × 10s = 5 min of history
+SPIKE_MULTIPLIER = _env_float("SPIKE_MULTIPLIER", 1.5)
+ADAPTIVE_WINDOW  = _env_int("ADAPTIVE_WINDOW",   30)
 
 # Watchdog targets
 WATCHED_SERVICES   = _env_list("WATCHED_SERVICES",   "")
@@ -149,6 +158,26 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _last_alert_times: dict[str, float] = {}
+_down_since: dict[str, float] = {}       # key → timestamp when it went down
+
+# Rolling histories for adaptive baseline checks
+_load_history:      deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
+_disk_io_r_history: deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
+_disk_io_w_history: deque[float] = deque(maxlen=ADAPTIVE_WINDOW)
+
+
+def _adaptive_threshold(history: deque, static_threshold: float) -> float:
+    """Return alert threshold that adapts to the recent baseline.
+
+    Requires at least 1/3 of the window filled before adapting.
+    Until then falls back to the static threshold.
+    Threshold = max(static, rolling_median) * SPIKE_MULTIPLIER
+    """
+    min_samples = max(5, ADAPTIVE_WINDOW // 3)
+    if len(history) < min_samples:
+        return static_threshold
+    baseline = statistics.median(history)
+    return max(static_threshold, baseline) * SPIKE_MULTIPLIER
 
 
 def _is_on_cooldown(alert_key: str) -> bool:
@@ -157,6 +186,18 @@ def _is_on_cooldown(alert_key: str) -> bool:
 
 def _mark_alert_sent(alert_key: str) -> None:
     _last_alert_times[alert_key] = time.time()
+
+
+def _format_downtime(seconds: float) -> str:
+    """Return human-readable downtime like '3 min 25s'."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins} min {secs}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins} min {secs}s"
 
 
 # ---------------------------------------------------------------------------
@@ -321,18 +362,21 @@ def check_swap() -> str | None:
 
 
 def check_load_average() -> str | None:
-    """Alert when the 1-minute load average exceeds LOAD_THRESHOLD."""
-    if _is_on_cooldown("load"):
-        return None
-
+    """Alert when load average spikes significantly above the rolling baseline."""
     load1, load5, load15 = os.getloadavg()
-    if load1 < LOAD_THRESHOLD:
+    _load_history.append(load1)
+
+    threshold = _adaptive_threshold(_load_history, LOAD_THRESHOLD)
+
+    if _is_on_cooldown("load") or load1 < threshold:
         return None
 
+    baseline = statistics.median(_load_history)
     _mark_alert_sent("load")
     return (
         f"🔥 High load average: {load1:.2f}  (logical CPUs: {psutil.cpu_count()})\n"
-        f"Load avg (1/5/15 min): {load1:.2f} / {load5:.2f} / {load15:.2f}"
+        f"Load avg (1/5/15 min): {load1:.2f} / {load5:.2f} / {load15:.2f}\n"
+        f"Adaptive baseline: {baseline:.1f}  →  threshold: {threshold:.1f}"
     )
 
 
@@ -365,91 +409,99 @@ def check_disk_io() -> str | None:
     _prev_io      = current_io
     _prev_io_time = current_time
 
-    if read_mbps < DISK_IO_READ_MBPS and write_mbps < DISK_IO_WRITE_MBPS:
+    _disk_io_r_history.append(read_mbps)
+    _disk_io_w_history.append(write_mbps)
+
+    read_threshold  = _adaptive_threshold(_disk_io_r_history, DISK_IO_READ_MBPS)
+    write_threshold = _adaptive_threshold(_disk_io_w_history, DISK_IO_WRITE_MBPS)
+
+    if read_mbps < read_threshold and write_mbps < write_threshold:
         return None
 
     if _is_on_cooldown("disk_io"):
         return None
 
+    r_baseline = statistics.median(_disk_io_r_history)
+    w_baseline = statistics.median(_disk_io_w_history)
     _mark_alert_sent("disk_io")
     return (
         f"💾 High disk I/O!\n"
-        f"Read:  {read_mbps:.1f} MB/s  (threshold: {DISK_IO_READ_MBPS:.0f} MB/s)\n"
-        f"Write: {write_mbps:.1f} MB/s  (threshold: {DISK_IO_WRITE_MBPS:.0f} MB/s)"
+        f"Read:  {read_mbps:.1f} MB/s  (baseline: {r_baseline:.0f}, threshold: {read_threshold:.0f} MB/s)\n"
+        f"Write: {write_mbps:.1f} MB/s  (baseline: {w_baseline:.0f}, threshold: {write_threshold:.0f} MB/s)"
     )
 
 
 # --- Service watchdog ---
 
-def check_services() -> str | None:
-    """Alert when any watched systemd service is not active.
-
-    Each service has its own cooldown key so a recovery + re-failure
-    triggers a fresh alert regardless of other services.
-    """
+def check_services() -> list[str]:
+    """Alert when any watched systemd service is not active, notify when it recovers."""
     if not WATCHED_SERVICES:
-        return None
+        return []
 
-    down = []
+    messages = []
     for svc in WATCHED_SERVICES:
         result = subprocess.run(
             ["systemctl", "is-active", "--quiet", svc],
             capture_output=True,
         )
-        if result.returncode != 0 and not _is_on_cooldown(f"svc:{svc}"):
-            _mark_alert_sent(f"svc:{svc}")
-            down.append(svc)
+        key = f"svc:{svc}"
+        is_down = result.returncode != 0
 
-    if not down:
-        return None
+        if is_down:
+            if key not in _down_since:
+                _down_since[key] = time.time()
+            if not _is_on_cooldown(key):
+                _mark_alert_sent(key)
+                messages.append(f"🚨 Service DOWN: {svc}")
+        else:
+            if key in _down_since:
+                duration = _format_downtime(time.time() - _down_since.pop(key))
+                _last_alert_times.pop(key, None)   # reset cooldown so next failure alerts immediately
+                messages.append(f"✅ Service recovered: {svc}\nWas down ~{duration} (±{CHECK_INTERVAL}s)")
 
-    lines = "\n".join(f"  • {s}" for s in down)
-    return f"🚨 Service(s) are DOWN:\n{lines}"
+    return messages
 
 
 # --- Docker container watchdog ---
 
-def check_docker_containers() -> str | None:
-    """Alert when any watched Docker container is not running.
-
-    Requires the Docker CLI to be available on PATH.
-    Container names must match exactly (docker ps --format '{{.Names}}').
-    """
+def check_docker_containers() -> list[str]:
+    """Alert when any watched Docker container is not running, notify when it recovers."""
     if not WATCHED_CONTAINERS:
-        return None
+        return []
 
-    down = []
+    messages = []
     for name in WATCHED_CONTAINERS:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{.State.Running}}", name],
             capture_output=True,
             text=True,
         )
+        key = f"docker:{name}"
         is_missing = result.returncode != 0
-        is_stopped = not is_missing and result.stdout.strip() != "true"
+        is_down = is_missing or result.stdout.strip() != "true"
 
-        if (is_missing or is_stopped) and not _is_on_cooldown(f"docker:{name}"):
-            _mark_alert_sent(f"docker:{name}")
-            status = "not found" if is_missing else "stopped"
-            down.append(f"{name} ({status})")
+        if is_down:
+            if key not in _down_since:
+                _down_since[key] = time.time()
+            if not _is_on_cooldown(key):
+                _mark_alert_sent(key)
+                status = "not found" if is_missing else "stopped"
+                messages.append(f"🐳 Container DOWN: {name} ({status})")
+        else:
+            if key in _down_since:
+                duration = _format_downtime(time.time() - _down_since.pop(key))
+                _last_alert_times.pop(key, None)
+                messages.append(f"✅ Container recovered: {name}\nWas down ~{duration} (±{CHECK_INTERVAL}s)")
 
-    if not down:
-        return None
-
-    lines = "\n".join(f"  • {c}" for c in down)
-    return f"🐳 Docker container(s) are DOWN:\n{lines}"
+    return messages
 
 
 # --- PM2 process watchdog ---
 
-def check_pm2_processes() -> str | None:
-    """Alert when any watched PM2 process is not online.
-
-    Runs 'pm2 jlist' as PM2_USER via 'su' so root can query any user's PM2 daemon.
-    Requires PM2_USER and WATCHED_PM2 to be set in config.
-    """
+def check_pm2_processes() -> list[str]:
+    """Alert when any watched PM2 process is not online, notify when it recovers."""
     if not WATCHED_PM2 or not PM2_USER:
-        return None
+        return []
 
     try:
         result = subprocess.run(
@@ -461,35 +513,36 @@ def check_pm2_processes() -> str | None:
         processes = json.loads(result.stdout)
     except subprocess.TimeoutExpired:
         log.error("pm2 jlist timed out for user %s", PM2_USER)
-        return None
+        return []
     except (json.JSONDecodeError, Exception) as exc:
         log.error("Failed to get PM2 process list for user %s: %s", PM2_USER, exc)
-        return None
+        return []
 
-    # Build name → status map from the JSON output
     status_map = {
         p["name"]: p.get("pm2_env", {}).get("status", "unknown")
         for p in processes
     }
 
-    down = []
+    messages = []
     for name in WATCHED_PM2:
+        key = f"pm2:{name}"
         status = status_map.get(name)
-        cooldown_key = f"pm2:{name}"
-        if _is_on_cooldown(cooldown_key):
-            continue
-        if status is None:
-            _mark_alert_sent(cooldown_key)
-            down.append(f"{name} (not found in PM2)")
-        elif status != "online":
-            _mark_alert_sent(cooldown_key)
-            down.append(f"{name} (status: {status})")
+        is_down = status is None or status != "online"
 
-    if not down:
-        return None
+        if is_down:
+            if key not in _down_since:
+                _down_since[key] = time.time()
+            if not _is_on_cooldown(key):
+                _mark_alert_sent(key)
+                detail = "not found in PM2" if status is None else f"status: {status}"
+                messages.append(f"⚙️ PM2 process DOWN: {name} ({detail})")
+        else:
+            if key in _down_since:
+                duration = _format_downtime(time.time() - _down_since.pop(key))
+                _last_alert_times.pop(key, None)
+                messages.append(f"✅ PM2 process recovered: {name}\nWas down ~{duration} (±{CHECK_INTERVAL}s)")
 
-    lines = "\n".join(f"  • {p}" for p in down)
-    return f"⚙️ PM2 process(es) are DOWN:\n{lines}"
+    return messages
 
 
 # ---------------------------------------------------------------------------
@@ -621,9 +674,11 @@ def main():
     while True:
         # --- Threshold and watchdog checks ---
         for check_fn, with_chart in THRESHOLD_CHECKS:
-            msg = check_fn()
-            if msg:
-                sender = send_message_with_chart if with_chart else send_message
+            result = check_fn()
+            # Watchdog functions return list[str]; threshold checks return str | None
+            msgs = result if isinstance(result, list) else ([result] if result else [])
+            sender = send_message_with_chart if with_chart else send_message
+            for msg in msgs:
                 sender(msg)
 
         # --- Journal errors (plain text — a RAM chart per error would be noisy) ---
