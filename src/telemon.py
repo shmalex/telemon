@@ -91,7 +91,9 @@ HOST_PREFIX = os.environ.get("HOST_PREFIX", "")
 HOSTNAME    = HOST_PREFIX + '-' + socket.gethostname() if HOST_PREFIX else socket.gethostname()
 
 CHECK_INTERVAL = _env_int("CHECK_INTERVAL", 10)    # seconds between cycles
-ALERT_COOLDOWN = _env_int("ALERT_COOLDOWN", 300)   # seconds before repeating an alert
+ALERT_COOLDOWN = _env_int("ALERT_COOLDOWN", 300)   # seconds before repeating an alert (default for all checks)
+LOAD_COOLDOWN     = _env_int("LOAD_COOLDOWN",     3600)  # separate cooldown for load average alerts (1 hour)
+DISK_IO_COOLDOWN  = _env_int("DISK_IO_COOLDOWN",  3600)  # separate cooldown for disk I/O alerts (1 hour)
 
 # Absolute path — correct when running as a systemd service
 STATE_FILE = "/var/lib/system-monitor/last_error_time.txt"
@@ -180,8 +182,9 @@ def _adaptive_threshold(history: deque, static_threshold: float) -> float:
     return max(static_threshold, baseline) * SPIKE_MULTIPLIER
 
 
-def _is_on_cooldown(alert_key: str) -> bool:
-    return (time.time() - _last_alert_times.get(alert_key, 0)) < ALERT_COOLDOWN
+def _is_on_cooldown(alert_key: str, cooldown: int | None = None) -> bool:
+    cd = cooldown if cooldown is not None else ALERT_COOLDOWN
+    return (time.time() - _last_alert_times.get(alert_key, 0)) < cd
 
 
 def _mark_alert_sent(alert_key: str) -> None:
@@ -368,7 +371,7 @@ def check_load_average() -> str | None:
 
     threshold = _adaptive_threshold(_load_history, LOAD_THRESHOLD)
 
-    if _is_on_cooldown("load") or load1 < threshold:
+    if _is_on_cooldown("load", LOAD_COOLDOWN) or load1 < threshold:
         return None
 
     baseline = statistics.median(_load_history)
@@ -418,7 +421,7 @@ def check_disk_io() -> str | None:
     if read_mbps < read_threshold and write_mbps < write_threshold:
         return None
 
-    if _is_on_cooldown("disk_io"):
+    if _is_on_cooldown("disk_io", DISK_IO_COOLDOWN):
         return None
 
     r_baseline = statistics.median(_disk_io_r_history)
