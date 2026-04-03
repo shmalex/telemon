@@ -132,20 +132,11 @@ def _build_tools():
 
 def _build_agent():
     from langchain_anthropic import ChatAnthropic
-    from langchain.agents import AgentExecutor, create_tool_calling_agent
-    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langgraph.prebuilt import create_react_agent
 
     llm   = ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY, max_tokens=1024)
     tools = _build_tools()
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ])
-
-    agent = create_tool_calling_agent(llm, tools, prompt)
-    return AgentExecutor(agent=agent, tools=tools, max_iterations=6, verbose=False)
+    return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +219,8 @@ def _poll_loop() -> None:
             log.info("Chatbot: processing query from %s: %s", sender, text[:120])
 
             try:
-                result = agent.invoke({"input": text})
-                answer = result.get("output", "No answer.")
+                result = agent.invoke({"messages": [{"role": "user", "content": text}]})
+                answer = result["messages"][-1].content
                 log.info("Chatbot: reply sent to %s (%d chars)", sender, len(answer))
             except Exception as exc:
                 log.error("Chatbot: agent error: %s", exc)
