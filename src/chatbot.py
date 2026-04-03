@@ -176,8 +176,16 @@ def _poll_loop() -> None:
         log.error("Chatbot: failed to build agent: %s", exc)
         return
 
-    offset = 0
     url    = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+
+    # Drain any updates that accumulated while the service was stopped
+    # so we don't answer stale messages after a restart.
+    try:
+        resp = requests.get(url, params={"timeout": 0, "offset": -1}, timeout=10)
+        updates = resp.json().get("result", [])
+        offset = updates[-1]["update_id"] + 1 if updates else 0
+    except Exception:
+        offset = 0
 
     while True:
         try:
