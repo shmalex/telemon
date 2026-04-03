@@ -750,13 +750,19 @@ def main():
     log.info("System monitor starting on %s", HOSTNAME)
 
     # Start chatbot in background (disabled automatically if ANTHROPIC_API_KEY is unset)
+    chatbot_status = "—"
     try:
         import sys, os as _os
         sys.path.insert(0, _os.path.dirname(__file__))
-        from chatbot import start_chatbot_thread
-        start_chatbot_thread()
+        from chatbot import start_chatbot_thread, ANTHROPIC_API_KEY as _ANTHROPIC_KEY, LLM_MODEL as _LLM_MODEL
+        if _ANTHROPIC_KEY:
+            start_chatbot_thread()
+            chatbot_status = f"✅ enabled ({_LLM_MODEL})"
+        else:
+            chatbot_status = "⛔ disabled (ANTHROPIC_API_KEY not set)"
     except ImportError as exc:
         log.warning("Chatbot not started: %s", exc)
+        chatbot_status = f"⛔ disabled (import error: {exc})"
 
     if not BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN is not set — messages will not be sent")
@@ -765,7 +771,8 @@ def main():
         f"🚀 System monitor started.\n"
         f"Watching services: {', '.join(WATCHED_SERVICES) or '—'}\n"
         f"Watching containers: {', '.join(WATCHED_CONTAINERS) or '—'}\n"
-        f"Watching PM2 ({PM2_USER}): {', '.join(WATCHED_PM2) or '—'}"
+        f"Watching PM2 ({PM2_USER}): {', '.join(WATCHED_PM2) or '—'}\n"
+        f"Chatbot: {chatbot_status}"
     )
 
     global _last_report_time
