@@ -183,13 +183,17 @@ def _poll_loop() -> None:
 
     url    = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
 
+    log.info("Chatbot listening on chat_id: %s", CHATBOT_CHAT_ID or "(not set — all chats accepted!)")
+
     # Drain any updates that accumulated while the service was stopped
     # so we don't answer stale messages after a restart.
     try:
         resp = requests.get(url, params={"timeout": 0, "offset": -1}, timeout=10)
         updates = resp.json().get("result", [])
         offset = updates[-1]["update_id"] + 1 if updates else 0
-    except Exception:
+        log.info("Chatbot: drained %d stale update(s), starting from offset %d", len(updates), offset)
+    except Exception as exc:
+        log.warning("Chatbot: failed to drain updates: %s", exc)
         offset = 0
 
     while True:
@@ -206,18 +210,27 @@ def _poll_loop() -> None:
 
             msg     = upd.get("message", {})
             chat_id = msg.get("chat", {}).get("id")
+            chat_type = msg.get("chat", {}).get("type", "?")
             text    = msg.get("text", "").strip()
+            sender  = msg.get("from", {}).get("username") or msg.get("from", {}).get("first_name", "?")
 
             if not text or not chat_id:
                 continue
-            if str(chat_id) != str(CHATBOT_CHAT_ID):
-                continue   # only respond to the configured chat
 
-            log.info("Chatbot query: %s", text[:120])
+            log.info("Chatbot: incoming message from %s (chat_id=%s type=%s): %s",
+                     sender, chat_id, chat_type, text[:80])
+
+            if str(chat_id) != str(CHATBOT_CHAT_ID):
+                log.warning("Chatbot: ignoring message — chat_id %s not in allowed list (expected %s)",
+                            chat_id, CHATBOT_CHAT_ID)
+                continue
+
+            log.info("Chatbot: processing query from %s: %s", sender, text[:120])
 
             try:
                 result = agent.invoke({"input": text})
                 answer = result.get("output", "No answer.")
+                log.info("Chatbot: reply sent to %s (%d chars)", sender, len(answer))
             except Exception as exc:
                 log.error("Chatbot: agent error: %s", exc)
                 answer = f"⚠️ Error: {exc}"
