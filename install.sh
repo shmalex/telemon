@@ -37,6 +37,15 @@ info "Installing Python dependencies..."
 python3 -m pip install matplotlib psutil requests python-dotenv \
     --break-system-packages --quiet
 
+# Chatbot dependencies — only if ANTHROPIC_API_KEY is configured
+if grep -qE "^ANTHROPIC_API_KEY=.+" "$SCRIPT_DIR/.env" 2>/dev/null; then
+    info "Installing chatbot dependencies (langchain, langchain-anthropic)..."
+    python3 -m pip install langchain langchain-anthropic \
+        --break-system-packages --quiet
+else
+    info "ANTHROPIC_API_KEY not set — skipping chatbot dependencies"
+fi
+
 # --- Directories -------------------------------------------------------------
 info "Creating directories..."
 mkdir -p "$DEPLOY_DIR"
@@ -45,6 +54,7 @@ mkdir -p "$STATE_DIR"
 # --- Deploy files ------------------------------------------------------------
 info "Deploying files to $DEPLOY_DIR ..."
 cp "$SCRIPT_DIR/src/telemon.py" "$DEPLOY_DIR/telemon.py"
+cp "$SCRIPT_DIR/src/chatbot.py" "$DEPLOY_DIR/chatbot.py"
 cp "$SCRIPT_DIR/.env"                  "$DEPLOY_DIR/.env"
 chmod 600 "$DEPLOY_DIR/.env"          # protect credentials from other users
 

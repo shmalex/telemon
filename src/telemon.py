@@ -749,6 +749,15 @@ THRESHOLD_CHECKS = [
 def main():
     log.info("System monitor starting on %s", HOSTNAME)
 
+    # Start chatbot in background (disabled automatically if ANTHROPIC_API_KEY is unset)
+    try:
+        import sys, os as _os
+        sys.path.insert(0, _os.path.dirname(__file__))
+        from chatbot import start_chatbot_thread
+        start_chatbot_thread()
+    except ImportError as exc:
+        log.warning("Chatbot not started: %s", exc)
+
     if not BOT_TOKEN:
         log.warning("TELEGRAM_BOT_TOKEN is not set — messages will not be sent")
 
