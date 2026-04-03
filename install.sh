@@ -26,6 +26,9 @@ echo "  Telemon — installation"
 echo "============================================="
 echo ""
 
+ssh scrg "pip3 install langchain langchain-anthropic --break-system-packages --ignore-installed typing-extensions"
+
+
 # --- Validate .env -----------------------------------------------------------
 [[ -f "$SCRIPT_DIR/.env" ]] || die ".env not found. Copy .env.example → .env and fill in TELEGRAM_BOT_TOKEN."
 
@@ -38,12 +41,12 @@ PIP_FLAGS="--break-system-packages --ignore-installed typing-extensions --quiet"
 info "Installing core Python dependencies..."
 python3 -m pip install matplotlib psutil requests python-dotenv $PIP_FLAGS
 
-# Chatbot dependencies — only if ANTHROPIC_API_KEY is configured
-if grep -qE "^ANTHROPIC_API_KEY=.+" "$SCRIPT_DIR/.env" 2>/dev/null; then
-    info "Installing chatbot dependencies (langchain, langchain-anthropic)..."
-    python3 -m pip install langchain langchain-anthropic $PIP_FLAGS
+# Chatbot dependencies — only if any LLM API key is configured
+if grep -qE "^(ANTHROPIC|OPENAI)_API_KEY=.+" "$SCRIPT_DIR/.env" 2>/dev/null; then
+    info "Installing chatbot dependencies (langchain, langchain-anthropic, langchain-openai)..."
+    python3 -m pip install langchain langchain-anthropic langchain-openai $PIP_FLAGS
 else
-    info "ANTHROPIC_API_KEY not set — skipping chatbot dependencies"
+    info "No LLM API key set — skipping chatbot dependencies"
 fi
 
 # --- Directories -------------------------------------------------------------

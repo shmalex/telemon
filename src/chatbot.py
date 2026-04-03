@@ -8,12 +8,15 @@ The bot only responds to messages from the configured TELEGRAM_CHAT_ID,
 so it shares the same Telegram bot as the alert channel.
 
 Required env vars:
-  ANTHROPIC_API_KEY  — Claude API key
   TELEGRAM_BOT_TOKEN — same as telemon
   TELEGRAM_CHAT_ID   — same as telemon
 
+  One of:
+  ANTHROPIC_API_KEY  — use Claude (default)
+  OPENAI_API_KEY     — use OpenAI (if ANTHROPIC_API_KEY is not set)
+
 Optional:
-  LLM_MODEL          — Claude model ID (default: claude-haiku-4-5-20251001)
+  LLM_MODEL          — model ID (default: gpt-4o-mini for OpenAI, claude-haiku-4-5-20251001 for Anthropic)
 """
 
 import logging
@@ -29,7 +32,15 @@ log = logging.getLogger(__name__)
 
 BOT_TOKEN         = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-LLM_MODEL         = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
+OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+
+# Pick provider: Anthropic takes priority over OpenAI
+if ANTHROPIC_API_KEY:
+    _default_model = "claude-haiku-4-5-20251001"
+else:
+    _default_model = "gpt-4o-mini"
+
+LLM_MODEL = os.environ.get("LLM_MODEL", _default_model)
 
 # CHATBOT_CHAT_ID — chat where the bot listens for questions.
 # Can be a private chat with the bot or a group.
@@ -131,10 +142,19 @@ def _build_tools():
 # ---------------------------------------------------------------------------
 
 def _build_agent():
-    from langchain_anthropic import ChatAnthropic
     from langgraph.prebuilt import create_react_agent
 
-    llm   = ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY, max_tokens=1024)
+    if ANTHROPIC_API_KEY:
+        from langchain_anthropic import ChatAnthropic
+        llm = ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY, max_tokens=1024)
+        log.info("Chatbot: using Anthropic (%s)", LLM_MODEL)
+    elif OPENAI_API_KEY:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(model=LLM_MODEL, api_key=OPENAI_API_KEY)
+        log.info("Chatbot: using OpenAI (%s)", LLM_MODEL)
+    else:
+        raise RuntimeError("No LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+
     tools = _build_tools()
     return create_react_agent(llm, tools, prompt=SYSTEM_PROMPT)
 
@@ -160,8 +180,8 @@ def _send_reply(chat_id: int | str, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _poll_loop() -> None:
-    if not ANTHROPIC_API_KEY:
-        log.warning("ANTHROPIC_API_KEY not set — chatbot disabled")
+    if not ANTHROPIC_API_KEY and not OPENAI_API_KEY:
+        log.warning("No LLM API key set (ANTHROPIC_API_KEY or OPENAI_API_KEY) — chatbot disabled")
         return
 
     log.info("Chatbot polling started (model: %s)", LLM_MODEL)

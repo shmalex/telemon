@@ -754,12 +754,13 @@ def main():
     try:
         import sys, os as _os
         sys.path.insert(0, _os.path.dirname(__file__))
-        from chatbot import start_chatbot_thread, ANTHROPIC_API_KEY as _ANTHROPIC_KEY, LLM_MODEL as _LLM_MODEL
-        if _ANTHROPIC_KEY:
+        from chatbot import start_chatbot_thread, ANTHROPIC_API_KEY as _ANTHROPIC_KEY, OPENAI_API_KEY as _OPENAI_KEY, LLM_MODEL as _LLM_MODEL
+        if _ANTHROPIC_KEY or _OPENAI_KEY:
             start_chatbot_thread()
-            chatbot_status = f"✅ enabled ({_LLM_MODEL})"
+            provider = "Anthropic" if _ANTHROPIC_KEY else "OpenAI"
+            chatbot_status = f"✅ enabled ({provider} / {_LLM_MODEL})"
         else:
-            chatbot_status = "⛔ disabled (ANTHROPIC_API_KEY not set)"
+            chatbot_status = "⛔ disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
     except ImportError as exc:
         log.warning("Chatbot not started: %s", exc)
         chatbot_status = f"⛔ disabled (import error: {exc})"
