@@ -33,15 +33,15 @@ TOKEN_LINE=$(grep -E "^TELEGRAM_BOT_TOKEN=.+" "$SCRIPT_DIR/.env" || true)
 [[ -n "$TOKEN_LINE" ]] || warn "TELEGRAM_BOT_TOKEN is empty — Telegram messages will not be sent"
 
 # --- Python dependencies -----------------------------------------------------
-info "Installing Python dependencies..."
-python3 -m pip install matplotlib psutil requests python-dotenv \
-    --break-system-packages --quiet
+PIP_FLAGS="--break-system-packages --ignore-installed typing-extensions --quiet"
+
+info "Installing core Python dependencies..."
+python3 -m pip install matplotlib psutil requests python-dotenv $PIP_FLAGS
 
 # Chatbot dependencies — only if ANTHROPIC_API_KEY is configured
 if grep -qE "^ANTHROPIC_API_KEY=.+" "$SCRIPT_DIR/.env" 2>/dev/null; then
     info "Installing chatbot dependencies (langchain, langchain-anthropic)..."
-    python3 -m pip install langchain langchain-anthropic \
-        --break-system-packages --quiet
+    python3 -m pip install langchain langchain-anthropic $PIP_FLAGS
 else
     info "ANTHROPIC_API_KEY not set — skipping chatbot dependencies"
 fi
