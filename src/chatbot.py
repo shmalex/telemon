@@ -28,9 +28,14 @@ import requests
 log = logging.getLogger(__name__)
 
 BOT_TOKEN         = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID           = os.environ.get("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LLM_MODEL         = os.environ.get("LLM_MODEL", "claude-haiku-4-5-20251001")
+
+# CHATBOT_CHAT_ID — chat where the bot listens for questions.
+# Can be a private chat with the bot or a group.
+# Defaults to TELEGRAM_CHAT_ID if not set separately.
+_alerts_chat_id  = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHATBOT_CHAT_ID  = os.environ.get("CHATBOT_CHAT_ID", _alerts_chat_id)
 
 SYSTEM_PROMPT = (
     "You are a Linux server monitoring assistant. "
@@ -205,7 +210,7 @@ def _poll_loop() -> None:
 
             if not text or not chat_id:
                 continue
-            if str(chat_id) != str(CHAT_ID):
+            if str(chat_id) != str(CHATBOT_CHAT_ID):
                 continue   # only respond to the configured chat
 
             log.info("Chatbot query: %s", text[:120])
