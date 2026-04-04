@@ -98,12 +98,16 @@ class DiagnosticState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def _get_llm():
+    from llm_logger import LLMFileLogger
+    callbacks = [LLMFileLogger()]
     if ANTHROPIC_API_KEY:
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY, max_tokens=600)
+        return ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY,
+                             max_tokens=600, callbacks=callbacks)
     elif OPENAI_API_KEY:
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=LLM_MODEL, api_key=OPENAI_API_KEY)
+        return ChatOpenAI(model=LLM_MODEL, api_key=OPENAI_API_KEY,
+                          callbacks=callbacks)
     raise RuntimeError("No LLM API key configured (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
 
 

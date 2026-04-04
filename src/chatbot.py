@@ -143,14 +143,18 @@ def _build_tools():
 
 def _build_agent():
     from langgraph.prebuilt import create_react_agent
+    from llm_logger import LLMFileLogger
+    callbacks = [LLMFileLogger()]
 
     if ANTHROPIC_API_KEY:
         from langchain_anthropic import ChatAnthropic
-        llm = ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY, max_tokens=1024)
+        llm = ChatAnthropic(model=LLM_MODEL, api_key=ANTHROPIC_API_KEY,
+                            max_tokens=1024, callbacks=callbacks)
         log.info("Chatbot: using Anthropic (%s)", LLM_MODEL)
     elif OPENAI_API_KEY:
         from langchain_openai import ChatOpenAI
-        llm = ChatOpenAI(model=LLM_MODEL, api_key=OPENAI_API_KEY)
+        llm = ChatOpenAI(model=LLM_MODEL, api_key=OPENAI_API_KEY,
+                         callbacks=callbacks)
         log.info("Chatbot: using OpenAI (%s)", LLM_MODEL)
     else:
         raise RuntimeError("No LLM API key configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY)")
