@@ -17,9 +17,11 @@ Configuration is loaded from a .env file in the project root.
 Alerts are throttled via per-check cooldowns to avoid spamming Telegram.
 """
 
+import ipaddress
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import statistics
@@ -119,6 +121,10 @@ ADAPTIVE_WINDOW  = _env_int("ADAPTIVE_WINDOW",   30)
 
 # Periodic digest chart — sent 3× per day by default (every 8 hours)
 REPORT_INTERVAL = _env_int("REPORT_INTERVAL", 8 * 3600)
+
+# SSH login monitor — alert on successful logins from unknown IPs
+# Comma-separated list of trusted IPs/CIDRs, e.g. "1.2.3.4,10.0.0.0/8"
+ALLOWED_SSH_IPS = _env_list("ALLOWED_SSH_IPS", "")
 
 # Watchdog targets
 WATCHED_SERVICES   = _env_list("WATCHED_SERVICES",   "")
@@ -633,6 +639,111 @@ def check_pm2_processes() -> list[str]:
     return messages
 
 
+# --- SSH login monitor ---
+
+_seen_ssh_sessions: set[str] = set()   # dedup by "user@ip:timestamp-minute"
+
+_SSH_STATE_FILE = "/var/lib/system-monitor/last_ssh_check.txt"
+
+
+def _ip_is_allowed(ip: str) -> bool:
+    """Return True if ip matches any entry in ALLOWED_SSH_IPS."""
+    if not ALLOWED_SSH_IPS:
+        return False   # empty = no trusted IPs configured = alert on everything
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for entry in ALLOWED_SSH_IPS:
+        try:
+            if "/" in entry:
+                if addr in ipaddress.ip_network(entry, strict=False):
+                    return True
+            else:
+                if addr == ipaddress.ip_address(entry):
+                    return True
+        except ValueError:
+            continue
+    return False
+
+
+def check_ssh_logins() -> list[str]:
+    """Alert on successful SSH logins from IPs not in ALLOWED_SSH_IPS."""
+    if not ALLOWED_SSH_IPS:
+        return []
+
+    # Read last check timestamp
+    os.makedirs(os.path.dirname(_SSH_STATE_FILE), exist_ok=True)
+    try:
+        since_ts = open(_SSH_STATE_FILE).read().strip()
+        since_dt = datetime.fromtimestamp(int(since_ts) / 1_000_000).strftime("%Y-%m-%d %H:%M:%S")
+        cmd = ["journalctl", "-u", "sshd", "-u", "ssh", "-o", "json",
+               "--since", since_dt]
+    except (FileNotFoundError, ValueError):
+        cmd = ["journalctl", "-u", "sshd", "-u", "ssh", "-o", "json",
+               "--since", "5 minutes ago"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except subprocess.CalledProcessError as exc:
+        log.error("check_ssh_logins: journalctl failed: %s", exc)
+        return []
+
+    messages = []
+    latest_ts = ""
+
+    for raw in result.stdout.splitlines():
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        msg = entry.get("MESSAGE", "")
+        ts  = entry.get("__REALTIME_TIMESTAMP", "")
+
+        if ts > latest_ts:
+            latest_ts = ts
+
+        # Match: Accepted password/publickey for USER from IP port PORT
+        m = re.search(
+            r"Accepted (\S+) for (\S+) from ([\d.a-fA-F:]+) port (\d+)",
+            msg,
+        )
+        if not m:
+            continue
+
+        method, user, ip, port = m.group(1), m.group(2), m.group(3), m.group(4)
+
+        if _ip_is_allowed(ip):
+            continue
+
+        # Dedup: same user+ip within the same minute
+        minute   = ts[:10] if ts else str(int(time.time() // 60))
+        dedup_key = f"{user}@{ip}:{minute}"
+        if dedup_key in _seen_ssh_sessions:
+            continue
+        _seen_ssh_sessions.add(dedup_key)
+
+        when = ""
+        if ts:
+            when = datetime.fromtimestamp(int(ts) / 1_000_000).strftime("%Y-%m-%d %H:%M:%S")
+
+        messages.append(
+            f"🔐 Unknown SSH login!\n"
+            f"User: {user}  |  IP: {ip}  |  Method: {method}\n"
+            f"Time: {when}"
+        )
+        log.warning("SSH login from unknown IP: %s@%s (%s)", user, ip, method)
+
+    if latest_ts:
+        with open(_SSH_STATE_FILE, "w") as fh:
+            fh.write(latest_ts)
+
+    return messages
+
+
 # ---------------------------------------------------------------------------
 # System journal reader
 # ---------------------------------------------------------------------------
@@ -806,6 +917,10 @@ def main():
         # --- Journal errors (plain text — a RAM chart per error would be noisy) ---
         for error_msg in get_journal_errors():
             send_message(error_msg)
+
+        # --- SSH login monitor ---
+        for ssh_msg in check_ssh_logins():
+            send_message(ssh_msg)
 
         # --- Record metrics snapshot & send periodic digest ---
         _record_metrics()
