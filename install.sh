@@ -57,8 +57,9 @@ mkdir -p "$STATE_DIR"
 # --- Deploy files ------------------------------------------------------------
 info "Deploying files to $DEPLOY_DIR ..."
 cp "$SCRIPT_DIR/src/telemon.py" "$DEPLOY_DIR/telemon.py"
-cp "$SCRIPT_DIR/src/chatbot.py"     "$DEPLOY_DIR/chatbot.py"
-cp "$SCRIPT_DIR/src/llm_logger.py"  "$DEPLOY_DIR/llm_logger.py"
+cp "$SCRIPT_DIR/src/chatbot.py"        "$DEPLOY_DIR/chatbot.py"
+cp "$SCRIPT_DIR/src/llm_logger.py"     "$DEPLOY_DIR/llm_logger.py"
+cp "$SCRIPT_DIR/src/chronic_tracker.py" "$DEPLOY_DIR/chronic_tracker.py"
 cp "$SCRIPT_DIR/.env"                  "$DEPLOY_DIR/.env"
 chmod 600 "$DEPLOY_DIR/.env"          # protect credentials from other users
 

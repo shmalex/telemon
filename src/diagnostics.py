@@ -77,6 +77,7 @@ class DiagnosticState(TypedDict):
     # ── current alert ────────────────────────────────────────────────────
     alert_text:  str
     alert_type:  str        # "load" | "disk_io" | "memory" | "journal" | "other"
+    peak_label:  str        # short human-readable peak value, e.g. "536 MB/s read"
 
     # ── iterative investigation ───────────────────────────────────────────
     context:     str        # baseline snapshot from collect_context
@@ -169,9 +170,20 @@ def collect_context(state: DiagnosticState) -> DiagnosticState:
         f"Disk /: {disk.percent:.1f}%  ({disk.free/1024**3:.1f} GB free)\n"
         f"Disk I/O: read {read_mbps:.1f} MB/s  write {write_mbps:.1f} MB/s"
     )
-    log.debug("diagnostics: context collected, type=%s", alert_type)
+    # Extract a short peak label from the alert text for chronic tracker
+    import re as _re
+    peak_label = ""
+    m = _re.search(r"Read:\s+([\d.]+\s*MB/s)", state["alert_text"])
+    if m:
+        peak_label = f"{m.group(1)} read"
+    else:
+        m = _re.search(r"load average:\s+([\d.]+)", state["alert_text"], _re.IGNORECASE)
+        if m:
+            peak_label = f"load {m.group(1)}"
+
+    log.debug("diagnostics: context collected, type=%s peak=%s", alert_type, peak_label)
     return {**state, "context": context, "alert_type": alert_type,
-            "gathered": [], "iterations": 0, "next_action": ""}
+            "peak_label": peak_label, "gathered": [], "iterations": 0, "next_action": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -193,13 +205,16 @@ def decide(state: DiagnosticState) -> DiagnosticState:
         log.debug("diagnostics: max iterations reached, forcing done")
         return {**state, "next_action": "done"}
 
+    # Already-gathered labels — exclude from available actions to prevent repeats
+    already_labels = {label for label, _ in state["gathered"]}
+    available = {k: v for k, v in _AVAILABLE_ACTIONS.items()
+                 if k not in already_labels or k == "done"}
+
     already = "\n".join(
         f"  - {label}" for label, _ in state["gathered"]
     ) or "  (nothing yet)"
 
-    actions_desc = "\n".join(
-        f"  {k}: {v}" for k, v in _AVAILABLE_ACTIONS.items()
-    )
+    actions_desc = "\n".join(f"  {k}: {v}" for k, v in available.items())
 
     prompt = (
         f"Alert: {state['alert_text']}\n\n"
@@ -214,8 +229,7 @@ def decide(state: DiagnosticState) -> DiagnosticState:
         llm    = _get_llm()
         resp   = llm.invoke(prompt)
         action = resp.content.strip().lower().split()[0]
-        # sanitize
-        if action not in _AVAILABLE_ACTIONS:
+        if action not in available:
             action = "done"
     except Exception as exc:
         log.error("diagnostics: decide failed: %s", exc)
@@ -497,20 +511,56 @@ def build_graph():
 _graph = None
 
 
-def run_diagnostic(alert_text: str) -> str:
-    """Run the diagnostic graph. Returns enriched report or original alert on failure."""
-    global _graph
+def run_diagnostic(alert_text: str) -> list[str]:
+    """
+    Run the diagnostic graph for an alert.
 
+    Returns a list of messages to send to Telegram:
+    - For ACUTE alerts: [full diagnostic report]
+    - For CHRONIC alerts: [transition message] or [] (suppressed)
+    - Also may include chronic hourly summaries from the tracker.
+    """
+    from chronic_tracker import get_tracker
+
+    tracker    = get_tracker()
+    alert_type = _classify_alert_type(alert_text)
+
+    # Extract peak label from text before running graph
+    import re as _re
+    peak_label = ""
+    m = _re.search(r"Read:\s+([\d.]+\s*MB/s)", alert_text)
+    if m:
+        peak_label = f"{m.group(1)} read"
+    else:
+        m = _re.search(r"load average:\s+([\d.]+)", alert_text, _re.IGNORECASE)
+        if m:
+            peak_label = f"load {m.group(1)}"
+
+    status = tracker.record(alert_type, peak_label)
+    transition_msg = tracker.get_transition_message(alert_type)
+
+    messages = []
+
+    if status == "chronic":
+        # Just became chronic — send transition message once
+        if transition_msg:
+            messages.append(transition_msg)
+        # Suppress full diagnostic report
+        return messages
+
+    # ACUTE — run full graph
     if not ANTHROPIC_API_KEY and not OPENAI_API_KEY:
-        return alert_text
+        return [alert_text]
 
+    global _graph
     try:
         if _graph is None:
             _graph = build_graph()
 
         initial: DiagnosticState = {
             "alert_text":    alert_text,
-            "alert_type":    "",
+            "alert_type":    alert_type,
+            "peak_label":    peak_label,
             "context":       "",
             "gathered":      [],
             "iterations":    0,
@@ -521,8 +571,28 @@ def run_diagnostic(alert_text: str) -> str:
             "alert_history": [],
         }
         result = _graph.invoke(initial)
-        return result["report"]
-
+        messages.append(result["report"])
     except Exception as exc:
         log.error("diagnostics: graph failed: %s", exc)
-        return alert_text
+        messages.append(alert_text)
+
+    return messages
+
+
+def get_chronic_summaries() -> list[str]:
+    """Return pending hourly chronic summaries. Call every monitoring cycle."""
+    from chronic_tracker import get_tracker
+    return [msg for _, msg in get_tracker().get_hourly_summaries()]
+
+
+def _classify_alert_type(text: str) -> str:
+    t = text.lower()
+    if "load average" in t:
+        return "load"
+    if "disk i/o" in t:
+        return "disk_io"
+    if "ram" in t or "memory" in t:
+        return "memory"
+    if "system error" in t or "journal" in t:
+        return "journal"
+    return "other"

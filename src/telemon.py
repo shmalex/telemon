@@ -891,12 +891,14 @@ def main():
     try:
         import sys as _sys, os as _os2
         _sys.path.insert(0, _os2.path.dirname(__file__))
-        from diagnostics import run_diagnostic as _run_diagnostic
-        _diagnose = _run_diagnostic
+        from diagnostics import run_diagnostic as _run_diagnostic, get_chronic_summaries as _get_chronic_summaries
+        _diagnose          = _run_diagnostic
+        _chronic_summaries = _get_chronic_summaries
         log.info("Diagnostics: LangGraph workflow enabled")
     except Exception as exc:
         log.warning("Diagnostics not available: %s", exc)
-        _diagnose = lambda text: text   # passthrough if unavailable
+        _diagnose          = lambda text: [text]
+        _chronic_summaries = lambda: []
 
     global _last_report_time
     _last_report_time = time.time()   # don't send a report immediately on start
@@ -911,8 +913,14 @@ def main():
             for msg in msgs:
                 # Run LangGraph diagnostic workflow for load/disk alerts
                 if any(kw in msg for kw in ("High load", "High disk I/O")):
-                    msg = _diagnose(msg)
-                sender(msg)
+                    for out in _diagnose(msg):
+                        sender(out)
+                else:
+                    sender(msg)
+
+        # --- Chronic issue hourly summaries ---
+        for summary in _chronic_summaries():
+            send_message(summary)
 
         # --- Journal errors (plain text — a RAM chart per error would be noisy) ---
         for error_msg in get_journal_errors():
