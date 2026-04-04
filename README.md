@@ -10,14 +10,16 @@ Linux background service that monitors system health and sends alerts to Telegra
 | RAM usage | Usage exceeds threshold % |
 | CPU usage | Usage exceeds threshold % |
 | Swap usage | Usage exceeds threshold % |
-| Load average | 1-min load average exceeds threshold |
-| Disk I/O | Read or write throughput exceeds threshold MB/s |
+| Load average | 1-min load spikes above adaptive baseline |
+| Disk I/O | Read or write throughput spikes above adaptive baseline |
 | Systemd services | Service is not `active` (nginx, postgresql, …) |
 | Docker containers | Container is stopped or not found |
 | PM2 processes | Process is not `online` |
 | Journal errors | New `journalctl` entries at priority 3 (error) or higher |
 
-Alerts are throttled — the same alert is not repeated for 5 minutes (configurable).
+Alerts are throttled per-check. Load and disk I/O use a **rolling median baseline** — alerts only fire when values spike significantly above recent normal (configurable multiplier).
+
+Every 8 hours a **digest chart** is sent to Telegram with 24h graphs of load, CPU and disk I/O.
 
 ---
 
@@ -26,11 +28,15 @@ Alerts are throttled — the same alert is not repeated for 5 minutes (configura
 ```
 telesystem/
 ├── src/
-│   └── telemon.py   # main service
-├── telemon.service          # systemd unit file (reference)
-├── .env                     # local config (do not commit)
-├── .env.example             # config template
-├── install.sh               # deploy script
+│   ├── telemon.py       # main service — monitoring loop
+│   ├── chatbot.py       # LangChain chatbot — answers questions via Telegram
+│   └── diagnostics.py  # LangGraph workflow — enriches alerts with LLM analysis
+├── docs/
+│   └── diagnostics-graph.md  # Mermaid diagram of the diagnostics workflow
+├── telemon.service      # systemd unit file (reference)
+├── .env                 # local config (do not commit)
+├── .env.example         # config template
+├── install.sh           # deploy script
 └── README.md
 ```
 
@@ -71,6 +77,41 @@ Full list of variables and their defaults is in [.env.example](.env.example).
 
 ---
 
+## Chatbot
+
+When `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` is set, a LangChain agent starts alongside the monitor and answers questions sent to the bot in Telegram.
+
+```
+ANTHROPIC_API_KEY=sk-ant-...   # or
+OPENAI_API_KEY=sk-...
+LLM_MODEL=gpt-4o-mini          # optional override
+
+# Chat where the bot listens (private chat or group — NOT a channel)
+CHATBOT_CHAT_ID=123456789
+```
+
+> **Note:** Telegram channels are send-only. The bot can only receive messages from a private chat or a group. Find your personal `chat_id` by messaging [@userinfobot](https://t.me/userinfobot).
+
+Example questions to send:
+```
+что сейчас с сервером?
+какие процессы грузят CPU?
+покажи последние ошибки
+что с докером?
+```
+
+---
+
+## LangGraph diagnostics
+
+When an alert fires for load average or disk I/O, a LangGraph workflow runs before the message is sent. It collects extra context, runs a type-specific investigation, asks the LLM for a root-cause analysis, and sends an enriched report instead of a raw threshold message.
+
+See [docs/diagnostics-graph.md](docs/diagnostics-graph.md) for the workflow diagram.
+
+Requires `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. Falls back to plain alert text if not configured.
+
+---
+
 ## Installation
 
 ```bash
@@ -79,25 +120,26 @@ sudo bash install.sh
 
 The script will:
 1. Install Python dependencies
-2. Deploy `telemon.py` to `/app/monitor/`
-3. Create state directory `/var/lib/system-monitor/`
-4. Write and enable the `telemon` systemd service
-5. Show service status on completion
+2. Install chatbot/diagnostics dependencies if an LLM API key is set
+3. Deploy `telemon.py`, `chatbot.py`, `diagnostics.py` to `/app/telemon/`
+4. Create state directory `/var/lib/system-monitor/`
+5. Write and enable the `telemon` systemd service
+6. Show service status on completion
 
 ---
 
 ## Updating an existing installation
 
-Deploy only the script (no reinstall needed):
+Deploy only the scripts (no reinstall needed):
 
 ```bash
-scp src/telemon.py scr:/app/telemon/telemon.py && ssh scr "systemctl restart telemon"
+scp src/telemon.py src/chatbot.py src/diagnostics.py scr:/app/telemon/ && ssh scr "systemctl restart telemon"
 ```
 
 If you also changed `.env`:
 
 ```bash
-scp .env scr:/app/monitor/.env && ssh scr "systemctl restart telemon"
+scp .env scr:/app/telemon/.env && ssh scr "systemctl restart telemon"
 ```
 
 Full reinstall (changed `telemon.service` or `install.sh`):
