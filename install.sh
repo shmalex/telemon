@@ -26,9 +26,6 @@ echo "  Telemon — installation"
 echo "============================================="
 echo ""
 
-ssh scrg "pip3 install langchain langchain-anthropic --break-system-packages --ignore-installed typing-extensions"
-
-
 # --- Validate .env -----------------------------------------------------------
 [[ -f "$SCRIPT_DIR/.env" ]] || die ".env not found. Copy .env.example → .env and fill in TELEGRAM_BOT_TOKEN."
 
