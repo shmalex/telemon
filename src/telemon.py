@@ -52,7 +52,11 @@ def _load_dotenv(path: Path) -> None:
                 continue
             key, _, value = line.partition("=")
             key   = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            # Strip inline comments (e.g. VALUE=123  # comment) but not quoted values
+            if value and not (value.startswith('"') or value.startswith("'")):
+                value = value.split("#")[0].strip()
+            value = value.strip('"').strip("'")
             if key and key not in os.environ:   # env already wins over .env
                 os.environ[key] = value
 
