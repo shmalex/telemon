@@ -100,6 +100,7 @@ CHECK_INTERVAL = _env_int("CHECK_INTERVAL", 10)    # seconds between cycles
 ALERT_COOLDOWN = _env_int("ALERT_COOLDOWN", 300)   # seconds before repeating an alert (default for all checks)
 LOAD_COOLDOWN     = _env_int("LOAD_COOLDOWN",     3600)  # separate cooldown for load average alerts (1 hour)
 DISK_IO_COOLDOWN  = _env_int("DISK_IO_COOLDOWN",  3600)  # separate cooldown for disk I/O alerts (1 hour)
+DISK_COOLDOWN     = _env_int("DISK_COOLDOWN",     3600)  # separate cooldown for low-disk-space alerts (1 hour)
 
 # Absolute path — correct when running as a systemd service
 STATE_FILE = "/var/lib/system-monitor/last_error_time.txt"
@@ -110,6 +111,7 @@ INITIAL_BACKOFF = 10   # seconds (doubled each retry)
 
 # Thresholds
 DISK_THRESHOLD_GB    = _env_float("DISK_THRESHOLD_GB",    50)
+DISK_CRITICAL_GB     = _env_float("DISK_CRITICAL_GB",     10)  # below this — escalate, ignore DISK_COOLDOWN
 MEMORY_THRESHOLD_PCT = _env_float("MEMORY_THRESHOLD_PCT", 90)
 CPU_THRESHOLD_PCT    = _env_float("CPU_THRESHOLD_PCT",    95)
 SWAP_THRESHOLD_PCT   = _env_float("SWAP_THRESHOLD_PCT",   80)
@@ -312,13 +314,22 @@ def _build_memory_chart() -> BytesIO:
 # ---------------------------------------------------------------------------
 
 def check_disk_space() -> str | None:
-    """Alert when free space on '/' falls below DISK_THRESHOLD_GB."""
-    if _is_on_cooldown("disk"):
-        return None
+    """Alert when free space on '/' falls below DISK_THRESHOLD_GB.
 
+    Regular low-space reminders repeat at most once per DISK_COOLDOWN (1 h
+    by default). If free space drops below DISK_CRITICAL_GB the alert
+    escalates: it uses its own key and the short default ALERT_COOLDOWN,
+    so a rapidly filling disk is never silenced for an hour.
+    """
     disk    = psutil.disk_usage("/")
     free_gb = disk.free / 1024 ** 3
     if free_gb >= DISK_THRESHOLD_GB:
+        return None
+
+    critical = free_gb < DISK_CRITICAL_GB
+    key      = "disk_critical" if critical else "disk"
+    cooldown = ALERT_COOLDOWN if critical else DISK_COOLDOWN
+    if _is_on_cooldown(key, cooldown):
         return None
 
     try:
@@ -328,9 +339,13 @@ def check_disk_space() -> str | None:
     except subprocess.CalledProcessError as exc:
         df_out = f"(df -h failed: {exc})"
 
-    _mark_alert_sent("disk")
+    _mark_alert_sent(key)
+    header = (
+        f"🚨 CRITICAL: disk almost full! (< {DISK_CRITICAL_GB:g} GB)"
+        if critical else "⚠️ Low disk space!"
+    )
     return (
-        f"⚠️ Low disk space!\n"
+        f"{header}\n"
         f"Free: {free_gb:.1f} GB  |  Threshold: {DISK_THRESHOLD_GB} GB\n\n"
         f"{df_out}"
     )
@@ -470,11 +485,8 @@ def _record_metrics() -> None:
     _metrics_history.append((time.time(), load1, cpu_pct, _last_read_mbps, _last_write_mbps))
 
 
-def send_report_chart() -> None:
-    """Build and send a 24h load + disk I/O digest chart to Telegram."""
-    if not _metrics_history:
-        return
-
+def _build_digest_buf() -> BytesIO:
+    """Render the 24h digest chart and return as in-memory PNG buffer."""
     timestamps = [datetime.fromtimestamp(e[0]) for e in _metrics_history]
     load_vals  = [e[1] for e in _metrics_history]
     cpu_vals   = [e[2] for e in _metrics_history]
@@ -487,7 +499,6 @@ def send_report_chart() -> None:
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
     fig.suptitle(f"{HOSTNAME} — digest ({title_period})", fontsize=12)
 
-    # Load average & CPU
     ax1.plot(timestamps, load_vals, color="#e74c3c", linewidth=1, label="Load avg (1m)")
     ax1.plot(timestamps, cpu_vals,  color="#e67e22", linewidth=1, alpha=0.6, label="CPU %")
     ax1.axhline(LOAD_THRESHOLD, color="#e74c3c", linewidth=0.8, linestyle="--", alpha=0.5)
@@ -495,7 +506,6 @@ def send_report_chart() -> None:
     ax1.legend(loc="upper right", fontsize=8)
     ax1.grid(True, alpha=0.3)
 
-    # Disk I/O
     ax2.fill_between(timestamps, read_vals,  alpha=0.4, color="#3498db", label="Read MB/s")
     ax2.fill_between(timestamps, write_vals, alpha=0.4, color="#2ecc71", label="Write MB/s")
     ax2.axhline(DISK_IO_READ_MBPS,  color="#3498db", linewidth=0.8, linestyle="--", alpha=0.5)
@@ -512,6 +522,23 @@ def send_report_chart() -> None:
     plt.savefig(buf, format="png", dpi=110)
     buf.seek(0)
     plt.close(fig)
+    return buf
+
+
+def send_report_chart() -> None:
+    """Build and send a 24h load + disk I/O digest chart to Telegram."""
+    if not _metrics_history:
+        return
+
+    buf = _build_digest_buf()
+
+    load_vals  = [e[1] for e in _metrics_history]
+    cpu_vals   = [e[2] for e in _metrics_history]
+    read_vals  = [e[3] for e in _metrics_history]
+    write_vals = [e[4] for e in _metrics_history]
+    timestamps = [datetime.fromtimestamp(e[0]) for e in _metrics_history]
+    hours_covered = (timestamps[-1] - timestamps[0]).total_seconds() / 3600
+    title_period = f"{hours_covered:.1f}h" if hours_covered < 23.5 else "24h"
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     caption = (
